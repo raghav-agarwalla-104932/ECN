@@ -23,23 +23,19 @@ export default function App() {
       <div className="flex flex-col min-h-screen bg-white">
         <Header isLoggedIn={isLoggedIn} setIsLoggedIn={setIsLoggedIn} />
 
-        <div className="flex flex-1">
-          {/* Sidebar (only shows when logged in) */}
-
-
-          <main className="flex-1">
-            <Routes>
-              <Route
-                path="/"
-                element={
-                  <>
-                    <Hero />
-                    <Features />
-                    <ClubPreview />
-                    <CallToAction />
-                  </>
-                }
-              />
+        <main className="flex-1">
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <>
+                  <Hero />
+                  <Features />
+                  <ClubPreview />
+                  <CallToAction />
+                </>
+              }
+            />
 
             <Route path="/discover" element={<DiscoverClubs />} />
             <Route path="/events" element={<Events isLoggedIn={isLoggedIn} />} />
@@ -65,7 +61,6 @@ export default function App() {
         </main>
 
         <Footer />
-      </div>
       </div>
     </AuthProvider>
   );
