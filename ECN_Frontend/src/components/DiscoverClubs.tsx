@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -86,6 +87,10 @@ type ClubProfile = {
   verified: boolean;
   lastUpdatedAt: string | null;
   updateRecencyBadge: string | null;
+  officers?: {
+    president: { name: string; email: string } | null;
+    officers: { name: string; email: string; role: string }[];
+  } | null;
 };
 
 const schoolOptions = [
@@ -124,15 +129,20 @@ function formatUpdatedAgo(iso: string): string {
 }
 
 export function DiscoverClubs() {
-  const [searchTerm, setSearchTerm] = useState("");
+  const [searchParams] = useSearchParams();
+  const initialSearch = searchParams.get("q") || "";
+  const initialVerified = searchParams.get("verified") === "true";
+  const clubIdFromUrl = searchParams.get("clubId");
+  
+  const [searchTerm, setSearchTerm] = useState(initialSearch);
   const [selectedSchool, setSelectedSchool] = useState("All Schools");
   const [selectedCategory, setSelectedCategory] = useState("All Categories");
   const [sortBy, setSortBy] = useState("rating");
-  const [showVerifiedOnly, setShowVerifiedOnly] = useState(false);
+  const [showVerifiedOnly, setShowVerifiedOnly] = useState(initialVerified);
 
   const [clubs, setClubs] = useState<Club[]>([]);
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
   // which club is expanded (its compact card is replaced by details)
@@ -156,6 +166,8 @@ export function DiscoverClubs() {
     setLoading(true);
     setErr(null);
 
+    const startTime = Date.now();
+
     fetch(`/api/clubs?${params.toString()}`, { signal: controller.signal })
       .then(async (r) => {
         if (!r.ok) throw new Error(await r.text());
@@ -171,10 +183,27 @@ export function DiscoverClubs() {
           setErr(e.message || "Failed to load clubs");
         }
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        // Ensure loading screen shows for at least 500ms
+        const elapsed = Date.now() - startTime;
+        const delay = Math.max(0, 500 - elapsed);
+        setTimeout(() => setLoading(false), delay);
+      });
 
     return () => controller.abort();
   }, [searchTerm, selectedSchool, selectedCategory, sortBy, showVerifiedOnly]);
+
+  // ---------------------------------------------------------------------
+  // AUTO-OPEN CLUB DETAILS IF clubId IS IN URL
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    if (clubIdFromUrl && clubs.length > 0 && !selectedClub) {
+      const club = clubs.find((c) => c.id === clubIdFromUrl);
+      if (club) {
+        handleViewDetails(club);
+      }
+    }
+  }, [clubIdFromUrl, clubs, selectedClub]);
 
   // ---------------------------------------------------------------------
   // VIEW DETAILS -> fetch /api/clubs/:id/profile and merge into Club
@@ -202,8 +231,8 @@ export function DiscoverClubs() {
             club.fullDescription ??
             club.description,
           contactEmail: profile.contactEmail ?? club.contactEmail,
-          // meetingInfo & officers currently only exist on the front-end mock
-          // so we leave them as-is on club for now
+          // Merge officers data from backend profile
+          officers: profile.officers ?? club.officers,
           verified:
             typeof profile.verified === "boolean"
               ? profile.verified
@@ -224,6 +253,40 @@ export function DiscoverClubs() {
         }, 0);
       }
     })();
+  };
+
+  // When user clicks "Request Info" from the compact list card, the
+  // list item may not include `contactEmail`. Fetch the club profile
+  // and use the profile's contact email (if available) before opening
+  // a mailto: link — matching the behavior used in the detailed view.
+  const handleRequestInfo = async (club: Club) => {
+    try {
+      // Prefer contactEmail already present on the list item
+      let email = club.contactEmail;
+
+      if (!email) {
+        const res = await fetch(`/api/clubs/${club.id}/profile`);
+        if (res.ok) {
+          const profile: ClubProfile = await res.json();
+          email = profile.contactEmail ?? undefined;
+        }
+      }
+
+      if (email) {
+        const template = `\nHello,\n\nI hope you are doing well. I’m reaching out because I’m interested in learning more about your organization, ${club.name}.\n\nCould you please provide more information about upcoming events, membership requirements, and how to get involved?\n\nThank you!\n`.trim();
+
+        window.location.href = `mailto:${email}?subject=${encodeURIComponent(
+          "Request for Information - " + club.name
+        )}&body=${encodeURIComponent(template)}`;
+      } else {
+        alert("No contact email available for this club");
+      }
+    } catch (e) {
+      console.error("Failed to fetch profile for request info", e);
+      // Fallback: if club.contactEmail existed earlier it would have been used,
+      // otherwise surface the alert to the user.
+      alert("Unable to open email composer right now");
+    }
   };
 
   const filteredAndSortedClubs = useMemo(() => {
@@ -291,7 +354,7 @@ export function DiscoverClubs() {
                 </h1>
                 <p className="text-gray-600 mt-2">
                   {loading
-                    ? "Loading…"
+                    ? "Loading... connecting to backend (may take ~1 minute)"
                     : `Find your community from ${total} active organizations`}
                 </p>
               </div>
@@ -391,6 +454,35 @@ export function DiscoverClubs() {
             </div>
           </div>
 
+          {/* Loading State */}
+          {loading && (
+            <div className="grid gap-6">
+              {[1, 2, 3].map((i) => (
+                <Card key={i} className="animate-pulse">
+                  <CardContent className="p-6">
+                    <div className="grid lg:grid-cols-4 gap-6">
+                      <div className="lg:col-span-2 space-y-3">
+                        <div className="h-6 bg-gray-200 rounded w-3/4"></div>
+                        <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+                        <div className="h-20 bg-gray-200 rounded"></div>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+                        <div className="h-16 bg-gray-200 rounded"></div>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+                        <div className="h-16 bg-gray-200 rounded"></div>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* Clubs Grid */}
+          {!loading && (
           <div className="grid gap-6">
             {filteredAndSortedClubs.map((club, index) => {
               const isSelected = selectedClub?.id === club.id;
@@ -527,9 +619,14 @@ export function DiscoverClubs() {
                                   ? "Loading…"
                                   : "View Details"}
                               </Button>
-                              <Button variant="outline" className="w-full">
+                              <Button
+                                variant="outline"
+                                className="w-full"
+                                onClick={() => handleRequestInfo(club)}
+                              >
                                 Request Info
                               </Button>
+
                               {club.website && (
                                 <Button
                                   variant="ghost"
@@ -564,11 +661,16 @@ export function DiscoverClubs() {
                   )}
 
                   {/* If selected, show ONLY the detailed view (no compact card) */}
-                  {isSelected && (
+                  {isSelected && selectedClub && (
                     <div
-                      id={`club-details-${club.id}`}
+                      id={`club-details-${selectedClub.id}`}
                       className="bg-white border rounded-xl shadow-sm"
                     >
+                      {(() => {
+                        // Use selectedClub for rendering to get merged data (including officers)
+                        const club = selectedClub;
+                        return (
+                          <>
                       {/* Header row */}
                       <div className="flex items-start justify-between p-6 border-b">
                         <div className="space-y-2">
@@ -599,9 +701,6 @@ export function DiscoverClubs() {
                         </div>
 
                         <div className="flex items-center space-x-2">
-                          <Button className="bg-[#012169] hover:bg-[#001a5c]">
-                            Apply to Join
-                          </Button>
                           <button
                             className="p-2 rounded-full hover:bg-gray-100"
                             onClick={() => setSelectedClub(null)}
@@ -742,58 +841,66 @@ export function DiscoverClubs() {
                                 <CardTitle>Leadership Structure</CardTitle>
                               </CardHeader>
                               <CardContent className="p-8">
-                                {club.officers ? (
+                                {club.officers && (club.officers.president || (club.officers.officers && club.officers.officers.length > 0)) ? (
                                   <div className="flex flex-col items-center space-y-8">
                                     {/* President */}
-                                    <div className="flex flex-col items-center">
-                                      <div className="w-72 p-6 bg-gradient-to-br from-purple-50 to-purple-100 border-2 border-purple-600 rounded-lg shadow-lg">
-                                        <div className="flex items-center space-x-3 mb-3">
-                                          <div className="w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-white">
-                                            <Users className="w-6 h-6" />
+                                    {club.officers.president && (
+                                      <>
+                                        <div className="flex flex-col items-center">
+                                          <div className="w-72 p-6 bg-gradient-to-br from-purple-50 to-purple-100 border-2 border-purple-600 rounded-lg shadow-lg">
+                                            <div className="flex items-center space-x-3 mb-3">
+                                              <div className="w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-gray">
+                                                <Users className="w-6 h-6" />
+                                              </div>
+                                              <Badge className="bg-purple-600 text-yellow-600">
+                                                President
+                                              </Badge>
+                                            </div>
+                                            <h3 className="font-bold text-lg text-gray-900">
+                                              {club.officers.president.name}
+                                            </h3>
+                                            <p className="text-sm text-gray-600 break-all">
+                                              {club.officers.president.email}
+                                            </p>
                                           </div>
-                                          <Badge className="bg-purple-600">
-                                            President
-                                          </Badge>
-                                        </div>
-                                        <h3 className="font-bold text-lg text-gray-900">
-                                          {club.officers.president.name}
-                                        </h3>
-                                        <p className="text-sm text-gray-600 break-all">
-                                          {club.officers.president.email}
-                                        </p>
-                                      </div>
 
-                                      <ArrowDown className="w-6 h-6 text-gray-400 my-4" />
-                                    </div>
+                                          {club.officers.officers && club.officers.officers.length > 0 && (
+                                            <ArrowDown className="w-6 h-6 text-gray-400 my-4" />
+                                          )}
+                                        </div>
+                                      </>
+                                    )}
 
                                     {/* Officers */}
-                                    <div className="grid md:grid-cols-3 gap-6 w-full max-w-5xl">
-                                      {club.officers.officers.map(
-                                        (officer, idx) => (
-                                          <div
-                                            key={idx}
-                                            className="flex flex-col items-center"
-                                          >
-                                            <div className="w-full p-5 bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-500 rounded-lg shadow-md">
-                                              <div className="flex items-center space-x-2 mb-3">
-                                                <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white">
-                                                  <Users className="w-5 h-5" />
+                                    {club.officers.officers && club.officers.officers.length > 0 && (
+                                      <div className="grid md:grid-cols-3 gap-6 w-full max-w-5xl">
+                                        {club.officers.officers.map(
+                                          (officer, idx) => (
+                                            <div
+                                              key={idx}
+                                              className="flex flex-col items-center"
+                                            >
+                                              <div className="w-full p-5 bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-500 rounded-lg shadow-md">
+                                                <div className="flex items-center space-x-2 mb-3">
+                                                  <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white">
+                                                    <Users className="w-5 h-5" />
+                                                  </div>
+                                                  <Badge className="bg-blue-600 text-xs">
+                                                    Officer
+                                                  </Badge>
                                                 </div>
-                                                <Badge className="bg-blue-600 text-xs">
-                                                  {officer.role}
-                                                </Badge>
+                                                <h3 className="font-semibold text-gray-900">
+                                                  {officer.name}
+                                                </h3>
+                                                <p className="text-sm text-gray-600 break-all">
+                                                  {officer.email}
+                                                </p>
                                               </div>
-                                              <h3 className="font-semibold text-gray-900">
-                                                {officer.name}
-                                              </h3>
-                                              <p className="text-sm text-gray-600 break-all">
-                                                {officer.email}
-                                              </p>
                                             </div>
-                                          </div>
-                                        )
-                                      )}
-                                    </div>
+                                          )
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
                                 ) : (
                                   <div className="text-center py-12 text-gray-500">
@@ -872,10 +979,19 @@ export function DiscoverClubs() {
                                     className="w-full"
                                     variant="outline"
                                     size="sm"
+                                    onClick={() => {
+                                      if (club.contactEmail) {
+                                        window.location.href = `mailto:${club.contactEmail}?subject=Request for Information - ${club.name}`;
+                                      } else {
+                                        alert('No contact email available for this club');
+                                      }
+                                    }}
                                   >
                                     <Mail className="w-4 h-4 mr-2" />
                                     Request More Information
                                   </Button>
+
+                                
                                 </CardContent>
                               </Card>
 
@@ -924,12 +1040,16 @@ export function DiscoverClubs() {
                           </TabsContent>
                         </Tabs>
                       </div>
+                    </>
+                    );
+                  })()}
                     </div>
                   )}
                 </React.Fragment>
               );
             })}
           </div>
+          )}
 
           {!loading && filteredAndSortedClubs.length === 0 && (
             <div className="text-center py-12">
@@ -949,3 +1069,4 @@ export function DiscoverClubs() {
     </div>
   );
 }
+

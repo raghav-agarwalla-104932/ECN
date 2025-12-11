@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { Header } from "./components/Header";
 import { Footer } from "./components/Footer";
-import { Sidebar } from "./components/Sidebar";
 import { Hero } from "./components/Hero";
 import { Features } from "./components/Features";
 import { ClubPreview } from "./components/ClubPreview";
@@ -15,9 +14,9 @@ import SignIn from "./pages/SignIn";
 import { AuthProvider } from "./context/AuthContext";
 import SignUp from "./pages/SignUp";
 import Verification from "./pages/Verification";
-
+import { isUserLoggedIn } from "./authSession";
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false); // placeholder true, logging in is buggy
+  const [isLoggedIn, setIsLoggedIn] = useState(isUserLoggedIn()); // placeholder true, logging in is buggy
 
   return (
     <AuthProvider>
@@ -42,29 +41,28 @@ export default function App() {
                 }
               />
 
-              <Route path="/discover" element={<DiscoverClubs />} />
-              <Route path="/events" element={<Events />} />
+            <Route path="/discover" element={<DiscoverClubs />} />
+            <Route path="/events" element={<Events isLoggedIn={isLoggedIn} />} />
 
-              <Route
-                path="/myclubs"
-                element={<MyClubs isLoggedIn={isLoggedIn} />}
-              />
+            <Route
+              path="/myclubs"
+              element={<MyClubs isLoggedIn={isLoggedIn} />}
+            />
 
-              <Route
-                path="/officers"
-                element={<ForOfficers isLoggedIn={isLoggedIn} />}
-              />
+            <Route
+              path="/officers"
+              element={<ForOfficers isLoggedIn={isLoggedIn} clubId="" />}
+            />
 
-              <Route
-                path="/signin"
-                element={<SignIn setIsLoggedIn={setIsLoggedIn} />}
-              />
+            <Route
+              path="/signin"
+              element={<SignIn setIsLoggedIn={setIsLoggedIn} />}
+            />
 
-              <Route path="/signup" element={<SignUp />} />
-              <Route path="/verify" element={<Verification />} />
-            </Routes>
-          </main>
-        </div>
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/verify" element={<Verification />} />
+          </Routes>
+        </main>
 
         <Footer />
       </div>

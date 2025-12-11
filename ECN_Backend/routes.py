@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, make_response, redirect
 from services import list_clubs, create_club, list_events, create_event, search_clubs_smart, auth_register, auth_login, auth_me, auth_cookie_name
 import os
 from db_ops import get_session
-from models import Club, Event, OfficerRole, Student
+from models import Club, Event, OfficerRole, Student, Review
 from sqlalchemy import func
 from datetime import datetime
 
@@ -83,7 +83,16 @@ def get_club_metrics(club_id):
         if not club:
             return jsonify({"error": "Club not found"}), 404
 
-        members = len(club.member_ids or [])
+        # Count all unique members from member_ids, officers, and OfficerRole table
+        member_set = set(club.member_ids or [])
+        member_set.update(club.officers or [])
+        
+        # Add members from OfficerRole table
+        officer_role_rows = session.query(OfficerRole).filter(OfficerRole.club_id == club_id).all()
+        for role in officer_role_rows:
+            member_set.add(role.student_id)
+        
+        members = len(member_set)
 
         events = session.query(Event).filter(Event.club_id == club_id).all()
         total_registered = sum(len(e.rsvp_ids or []) for e in events)
@@ -103,19 +112,53 @@ def get_club_metrics(club_id):
         #Simple placeholders—replace with real analytics later
         """
 
-        member_growth = 12
-        profile_views = 245
-        profile_growth = 8
-        freshness_score = 92
-        engagement_score = min(100, int(0.6 * attendance_rate + 0.4 * 85))
+        # Calculate member growth (placeholder - would need historical data)
+        # For now, estimate based on recent activity
+        member_growth = 0  # Set to 0 since we don't have historical data
+        
+        # Profile views - placeholder (would need analytics tracking)
+        profile_views = members * 5  # Rough estimate: 5 views per member
+        
+        # Profile growth (placeholder - would need historical view data)
+        profile_growth = 0  # Set to 0 since we don't have historical data
+        
+        # Freshness score - based on last updated date
+        from datetime import datetime, timezone
+        if club.last_updated_at:
+            days_since_update = (datetime.now(timezone.utc) - club.last_updated_at).days
+            freshness_score = max(0, min(100, 100 - (days_since_update * 2)))
+        else:
+            freshness_score = 50  # Neutral score if never updated
+        
+        # Engagement score - combine attendance rate and event count
+        event_factor = min(100, len(events) * 10)  # More events = higher engagement
+        engagement_score = min(100, int(0.5 * attendance_rate + 0.3 * event_factor + 0.2 * freshness_score))
 
         event_attendance = int(round(total_attended / len(events))) if events else 0
+
+        # Calculate attendance rate change from last month
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        last_month_start = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+        prev_month_start = (now - timedelta(days=60)).replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Events from last month (30-60 days ago)
+        prev_events = [e for e in events if prev_month_start <= e.start_time < last_month_start]
+        prev_registered = sum(len(e.rsvp_ids or []) for e in prev_events)
+        prev_attended = sum(len(e.attendee_ids or []) for e in prev_events)
+        prev_attendance_rate = round(
+            (prev_attended / prev_registered) * 100, 1
+        ) if prev_registered else 0.0
+        
+        # Calculate the change
+        attendance_rate_change = round(attendance_rate - prev_attendance_rate, 1) if prev_attendance_rate else 0.0
 
         payload = {
             "members": members,
             "memberGrowth": member_growth,
             "eventAttendance": event_attendance,
             "attendanceRate": attendance_rate,
+            "attendanceRateChange": attendance_rate_change,
             "profileViews": profile_views,
             "profileGrowth": profile_growth,
             "freshnessScore": freshness_score,
@@ -201,6 +244,322 @@ def get_club_members(club_id):
         return jsonify(results)
 
 
+@api_bp.post("/clubs/<uuid:club_id>/kick")
+def kick_member(club_id):
+    """
+    Remove a member from a club (president only).
+    
+    Request JSON:
+      { "userId": "<student_uuid>", "kickedBy": "<president_uuid>" }
+    
+    - kickedBy must be a president of the club
+    - Removes the member from all club arrays and OfficerRole table
+    - Removes club from student's my_clubs and officer_clubs arrays
+    - Prevents presidents from kicking themselves or other presidents
+    """
+    data = request.get_json(force=True) or {}
+    member_id = data.get("userId") or data.get("studentId")
+    kicked_by = data.get("kickedBy")
+    
+    if not member_id:
+        return jsonify({"error": "missing_user_id", "detail": "userId is required"}), 400
+    
+    if not kicked_by:
+        return jsonify({"error": "missing_kicked_by", "detail": "kickedBy is required"}), 400
+    
+    with get_session() as session:
+        # Check if club exists
+        club = session.get(Club, club_id)
+        if not club:
+            return jsonify({"error": "club_not_found"}), 404
+        
+        # Check if kicker is president
+        president_role = session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == uuid.UUID(kicked_by),
+            OfficerRole.role == "president"
+        ).first()
+        
+        if not president_role:
+            return jsonify({"error": "only_president_can_kick", "detail": "Only presidents can remove members"}), 403
+        
+        # Prevent self-removal
+        if uuid.UUID(member_id) == uuid.UUID(kicked_by):
+            return jsonify({"error": "cannot_kick_self", "detail": "Cannot remove yourself"}), 400
+        
+        # Check if member is a president (cannot kick other presidents)
+        member_president = session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == uuid.UUID(member_id),
+            OfficerRole.role == "president"
+        ).first()
+        
+        if member_president:
+            return jsonify({"error": "cannot_kick_president", "detail": "Cannot remove another president"}), 403
+        
+        # Check if member exists
+        member = session.get(Student, uuid.UUID(member_id))
+        if not member:
+            return jsonify({"error": "member_not_found"}), 404
+        
+        # Remove from club arrays
+        club.member_ids = [m for m in (club.member_ids or []) if m != uuid.UUID(member_id)]
+        club.officers = [o for o in (club.officers or []) if o != uuid.UUID(member_id)]
+        
+        # Remove OfficerRole entries for this student in this club
+        session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == uuid.UUID(member_id)
+        ).delete()
+        
+        # Remove club from student's arrays
+        member.my_clubs = [c for c in (member.my_clubs or []) if c != club_id]
+        member.officer_clubs = [c for c in (member.officer_clubs or []) if c != club_id]
+        member.favorite_clubs = [c for c in (member.favorite_clubs or []) if c != club_id]
+        
+        session.commit()
+        
+        return jsonify({"kicked": True, "memberCount": len(club.member_ids or [])}), 200
+
+
+@api_bp.post("/clubs/<uuid:club_id>/members")
+def add_club_member(club_id):
+    """
+    Add a member to a club by email (president/officer only).
+    
+    Request body: { "email": "student@emory.edu" }
+    
+    Returns:
+    - 200: Member added successfully
+    - 400: Invalid request or member already in club
+    - 404: Student with email not found or club not found
+    - 401: Not authenticated
+    - 403: Not authorized (not an officer)
+    """
+    # Get current user from session cookie
+    token = request.cookies.get(auth_cookie_name(), "")
+    print(f"[ADD MEMBER] Cookie name: {auth_cookie_name()}, Token: {token[:20] if token else 'NONE'}")
+    print(f"[ADD MEMBER] All cookies: {list(request.cookies.keys())}")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+    
+    try:
+        current_user_data = auth_me(token)
+        current_user_id = uuid.UUID(current_user_data["user"]["id"])
+    except Exception as e:
+        return jsonify({"error": f"Invalid session: {str(e)}"}), 401
+    
+    with get_session() as session:
+        club = session.get(Club, club_id)
+        if not club:
+            return jsonify({"error": "Club not found"}), 404
+        
+        # Check if current user is president or officer
+        is_president = current_user_id in (club.president_ids or [])
+        is_officer = current_user_id in (club.officers or [])
+        
+        if not (is_president or is_officer):
+            return jsonify({"error": "Not authorized. Only presidents and officers can add members."}), 403
+        
+        # Get email from request body
+        body = request.get_json() or {}
+        email = (body.get("email") or "").strip().lower()
+        
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+        
+        # Find student by email
+        student = session.query(Student).filter(func.lower(Student.email) == email).first()
+        
+        if not student:
+            return jsonify({"error": "No user found with that email address"}), 404
+        
+        # Check if already a member
+        if student.id in (club.member_ids or []):
+            return jsonify({"error": "User is already a member of this club"}), 400
+        
+        # Add student to club
+        club.member_ids = list(club.member_ids or []) + [student.id]
+        
+        # Add club to student's my_clubs
+        student.my_clubs = list(student.my_clubs or [])
+        if club.id not in student.my_clubs:
+            student.my_clubs.append(club.id)
+        
+        session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"{student.name} has been added to {club.name}",
+            "member": {
+                "id": str(student.id),
+                "name": student.name,
+                "email": student.email
+            },
+            "memberCount": len(club.member_ids or [])
+        }), 200
+
+
+@api_bp.delete("/clubs/<uuid:club_id>/members/<uuid:member_id>")
+def remove_club_member(club_id, member_id):
+    """
+    Remove a member from a club (president only) - Cookie-based authentication version.
+    
+    - Validates the current user is the president via ecn_session cookie
+    - Removes the member from all club arrays and OfficerRole table
+    - Removes club from student's my_clubs and officer_clubs arrays
+    - Prevents presidents from removing themselves or other presidents
+    """
+    # Get current user from session cookie
+    token = request.cookies.get(auth_cookie_name(), "")
+    print(f"[DELETE MEMBER] Token: {token[:20] if token else 'NONE'}, All cookies: {list(request.cookies.keys())}")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+    
+    try:
+        current_user_data = auth_me(token)
+        current_user_id = uuid.UUID(current_user_data["user"]["id"])
+    except Exception as e:
+        return jsonify({"error": f"Invalid session: {str(e)}"}), 401
+    
+    with get_session() as session:
+        # Check if club exists
+        club = session.get(Club, club_id)
+        if not club:
+            return jsonify({"error": "Club not found"}), 404
+        
+        # Check if current user is president
+        president_role = session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == current_user_id,
+            OfficerRole.role == "president"
+        ).first()
+        
+        if not president_role:
+            return jsonify({"error": "Only presidents can remove members"}), 403
+        
+        # Prevent self-removal
+        if member_id == current_user_id:
+            return jsonify({"error": "Cannot remove yourself"}), 400
+        
+        # Check if member is a president (cannot kick other presidents)
+        member_president = session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == member_id,
+            OfficerRole.role == "president"
+        ).first()
+        
+        if member_president:
+            return jsonify({"error": "Cannot remove another president"}), 403
+        
+        # Check if member exists
+        member = session.get(Student, member_id)
+        if not member:
+            return jsonify({"error": "Member not found"}), 404
+        
+        # Remove from club arrays
+        club.member_ids = [m for m in (club.member_ids or []) if m != member_id]
+        club.officers = [o for o in (club.officers or []) if o != member_id]
+        
+        # Remove OfficerRole entries for this student in this club
+        session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == member_id
+        ).delete()
+        
+        # Remove club from student's arrays
+        member.my_clubs = [c for c in (member.my_clubs or []) if c != club_id]
+        member.officer_clubs = [c for c in (member.officer_clubs or []) if c != club_id]
+        member.favorite_clubs = [c for c in (member.favorite_clubs or []) if c != club_id]
+        
+        session.commit()
+        
+        return jsonify({"success": True, "message": f"Member {member.name} removed from club"}), 200
+
+
+@api_bp.post("/clubs/<uuid:club_id>/promote")
+def promote_member(club_id):
+    """
+    Promote a member to Officer or Transfer Presidency.
+    Body: { "userId": "...", "newRole": "officer" | "president", "promotedBy": "..." }
+    """
+    data = request.get_json(force=True) or {}
+    target_user_id = data.get("userId")
+    promoter_id = data.get("promotedBy")
+    new_role = data.get("newRole")
+
+    if not target_user_id or not promoter_id or not new_role:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    with get_session() as session:
+        # Verify Promoter is President
+        promoter_role = session.query(OfficerRole).filter(
+            OfficerRole.club_id == club_id,
+            OfficerRole.student_id == uuid.UUID(promoter_id),
+            OfficerRole.role == "president"
+        ).first()
+
+        if not promoter_role:
+            return jsonify({"error": "Unauthorized. Only the President can promote members."}), 403
+
+        target_uuid = uuid.UUID(target_user_id)
+        club = session.get(Club, club_id)
+        if not club:
+            return jsonify({"error": "Club not found"}), 404
+
+        if new_role == "officer":
+            # Check if already officer
+            existing = session.query(OfficerRole).filter(
+                OfficerRole.club_id == club_id,
+                OfficerRole.student_id == target_uuid
+            ).first()
+            
+            if existing:
+                existing.role = "officer"
+            else:
+                new_officer = OfficerRole(
+                    club_id=club_id, 
+                    student_id=target_uuid, 
+                    role="officer",
+                    assigned_at=datetime.utcnow()
+                )
+                session.add(new_officer)
+            
+            # Update Club/Student Arrays
+            if target_uuid not in (club.officers or []):
+                club.officers = list(club.officers or []) + [target_uuid]
+
+        elif new_role == "president":
+            # Delete all existing roles for both users to avoid constraint violation
+            session.query(OfficerRole).filter(
+                OfficerRole.club_id == club_id,
+                OfficerRole.student_id.in_([target_uuid, uuid.UUID(promoter_id)])
+            ).delete()
+            
+            # Create officer role for demoted president
+            demoted_officer = OfficerRole(
+                club_id=club_id,
+                student_id=uuid.UUID(promoter_id),
+                role="officer",
+                assigned_at=datetime.utcnow()
+            )
+            session.add(demoted_officer)
+            
+            # Create new president role for target
+            new_pres = OfficerRole(
+                club_id=club_id, 
+                student_id=target_uuid, 
+                role="president",
+                assigned_at=datetime.utcnow()
+            )
+            session.add(new_pres)
+
+            # Update Arrays
+            club.president_ids = [target_uuid]
+            
+        session.commit()
+        return jsonify({"success": True})
+
 
 @api_bp.get("/clubs/<uuid:club_id>/events")
 def get_club_events(club_id):
@@ -222,8 +581,12 @@ def get_club_events(club_id):
         events = q.order_by(Event.start_time.asc()).all()
 
         def fmt_time(dt):
-            # "7:00 PM" style
-            return dt.strftime("%-I:%M %p") if dt else None
+            if not dt:
+                return None
+            from zoneinfo import ZoneInfo
+            from datetime import timezone
+            est_time = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+            return est_time.strftime("%-I:%M %p")
 
         payload = [
             {
@@ -236,10 +599,11 @@ def get_club_events(club_id):
                 "location": e.location,
                 "capacity": e.rsvp_limit,
                 "registered": len(e.rsvp_ids or []),
-                "status": e.status,  # "draft" | "published" | "live"
+                "status": e.status,
             }
             for e in events
         ]
+
 
         return jsonify(payload)
 
@@ -756,6 +1120,18 @@ def get_student_my_clubs(student_id):
         # Fetch all clubs
         clubs = session.query(Club).filter(Club.id.in_(club_ids)).all()
         
+        # Fetch user reviews for these clubs
+        user_reviews = (
+            session.query(Review)
+            .filter(
+                Review.student_id == student_id,
+                Review.club_id.in_(club_ids)
+            )
+            .all()
+        )
+        # Create a lookup dict: club_id -> rating
+        review_map = {r.club_id: r.rating for r in user_reviews}
+        
         # Get officer roles for this student
         officer_roles = (
             session.query(OfficerRole)
@@ -828,11 +1204,13 @@ def get_student_my_clubs(student_id):
             next_event = None
             if upcoming_events:
                 e = upcoming_events[0]
+                from zoneinfo import ZoneInfo
+                est_time = e.start_time.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
                 next_event = {
                     "id": str(e.id),
                     "name": e.title,
-                    "date": e.start_time.strftime("%b %d") if e.start_time else None,
-                    "time": e.start_time.strftime("%-I:%M %p") if e.start_time else None,
+                    "date": est_time.strftime("%b %d") if e.start_time else None,
+                    "time": est_time.strftime("%-I:%M %p") if e.start_time else None,
                 }
             
             # Build recent activity from events
@@ -890,21 +1268,71 @@ def get_student_my_clubs(student_id):
                 "id": str(club.id),
                 "name": club.name,
                 "role": role,
-                "joinDate": student.created_at.isoformat() if student.created_at else None,
-                "category": "General",  # You may want to add a category field to Club model
+                "joinDate": club.created_at.isoformat() if club.created_at else None,
+                "category": "General",  # Placeholder
                 "verified": club.verified,
                 "lastActivity": last_activity,
                 "memberCount": member_count,
                 "engagement": engagement,
                 "nextEvent": next_event,
                 "recentActivity": recent_activity,
+                "userRating": review_map.get(club.id, 0),
             })
         
-        # Sort by role priority (President > Officer > Member)
-        role_priority = {"President": 0, "Officer": 1, "Member": 2}
-        results.sort(key=lambda x: role_priority.get(x["role"], 3))
-        
         return jsonify(results)
+
+
+@api_bp.post("/clubs/<uuid:club_id>/review")
+def rate_club(club_id):
+    """
+    Allows a student to rate a club (1-5 stars).
+    Upserts the review (updates if exists, creates if not).
+    """
+    data = request.get_json(force=True) or {}
+    student_id = data.get("userId")
+    rating = data.get("rating")
+
+    if not student_id:
+        return jsonify({"error": "Missing userId"}), 400
+    
+    if rating is None:
+        return jsonify({"error": "Missing rating"}), 400
+
+    try:
+        rating = int(rating)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Rating must be a number"}), 400
+
+    if not (1 <= rating <= 5):
+        return jsonify({"error": "Rating must be between 1 and 5"}), 400
+
+    with get_session() as session:
+        # Check if club exists
+        club = session.get(Club, club_id)
+        if not club:
+            return jsonify({"error": "Club not found"}), 404
+        
+        # Check if review already exists
+        existing_review = session.query(Review).filter(
+            Review.club_id == club_id,
+            Review.student_id == uuid.UUID(student_id)
+        ).first()
+
+        if existing_review:
+            existing_review.rating = rating
+            existing_review.updated_at = datetime.utcnow()
+        else:
+            new_review = Review(
+                club_id=club_id,
+                student_id=uuid.UUID(student_id),
+                rating=rating,
+                status="approved",
+                review_text=""
+            )
+            session.add(new_review)
+        
+        session.commit()
+        return jsonify({"ok": True, "rating": rating}), 200
 
 
 @api_bp.get("/students/<uuid:student_id>/upcoming-events")
@@ -956,15 +1384,17 @@ def get_student_upcoming_events(student_id):
         student_rsvped = set(student.rsvped_events or [])
         
         results = []
+        from zoneinfo import ZoneInfo
         for event, club in events:
+            est_time = event.start_time.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
             results.append({
                 "id": str(event.id),
                 "name": event.title,
                 "description": event.description,
                 "clubId": str(club.id),
                 "clubName": club.name,
-                "date": event.start_time.strftime("%b %d") if event.start_time else None,
-                "time": event.start_time.strftime("%-I:%M %p") if event.start_time else None,
+                "date": est_time.strftime("%b %d") if event.start_time else None,
+                "time": est_time.strftime("%-I:%M %p") if event.start_time else None,
                 "startTime": event.start_time.isoformat() if event.start_time else None,
                 "location": event.location,
                 "capacity": event.rsvp_limit,
@@ -1037,6 +1467,36 @@ def get_student_stats(student_id):
             "leadershipRoles": leadership_roles,
             "avgEngagement": avg_engagement,
         })
+
+
+@api_bp.get("/students/search")
+def search_student_by_email():
+    """
+    Search for a student by email address.
+    
+    Query params:
+      ?email=<student_email>
+    
+    Response:
+      200 { "id": "<uuid>", "name": "<name>", "email": "<email>" }
+      404 { "error": "student_not_found" }
+    """
+    email = request.args.get("email", "").strip().lower()
+    
+    if not email:
+        return jsonify({"error": "email_required", "detail": "Email query parameter is required"}), 400
+    
+    with get_session() as session:
+        student = session.query(Student).filter(func.lower(Student.email) == email).first()
+        
+        if not student:
+            return jsonify({"error": "student_not_found", "detail": "No user found with that email address"}), 404
+        
+        return jsonify({
+            "id": str(student.id),
+            "name": student.name,
+            "email": student.email,
+        }), 200
 
 
 @api_bp.post("/clubs/<uuid:club_id>/join")

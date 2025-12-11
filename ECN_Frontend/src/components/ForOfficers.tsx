@@ -45,6 +45,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "./ui/popover";
 
 import {
   BarChart3,
@@ -83,6 +88,7 @@ interface ClubMetrics {
   memberGrowth: number;
   eventAttendance: number;
   attendanceRate: number;
+  attendanceRateChange: number;
   profileViews: number;
   profileGrowth: number;
   freshnessScore: number;
@@ -147,6 +153,7 @@ const emptyMetrics: ClubMetrics = {
   memberGrowth: 0,
   eventAttendance: 0,
   attendanceRate: 0,
+  attendanceRateChange: 0,
   profileViews: 0,
   profileGrowth: 0,
   freshnessScore: 0,
@@ -189,11 +196,11 @@ export function ForOfficers({
   const [memberToKick, setMemberToKick] = useState<Member | null>(null);
   const [showKickDialog, setShowKickDialog] = useState(false);
   const [showInviteMemberDialog, setShowInviteMemberDialog] = useState(false);
+  const [memberToPromote, setMemberToPromote] = useState<Member | null>(null);
+  const [showPromoteDialog, setShowPromoteDialog] = useState(false);
 
   const [inviteForm, setInviteForm] = useState({
-    memberName: "",
     memberEmail: "",
-    message: "",
   });
 
   // Metrics
@@ -419,14 +426,15 @@ export function ForOfficers({
   // 1) Fetch officer clubs for this user
   // --------------------------------------------------
   useEffect(() => {
-    if (!isLoggedIn || !userId) return;
+    const currentUserId = getCurrentUserId();
+    if (!isLoggedIn || !currentUserId) return;
 
     const fetchOfficerClubs = async () => {
       try {
         setLoadingClubs(true);
         setClubsError(null);
 
-        const url = `${effectiveBase}/students/${userId}/officer-clubs`;
+        const url = `${effectiveBase}/students/${currentUserId}/officer-clubs`;
         console.log("Fetching officer clubs from:", url);
 
         const res = await fetch(url, { credentials: "include" });
@@ -550,6 +558,34 @@ export function ForOfficers({
   }, [isLoggedIn, effectiveBase, effectiveClubId]);
 
   // --------------------------------------------------
+  // 4) Populate activity from upcoming events
+  // --------------------------------------------------
+  useEffect(() => {
+    if (events.length === 0) {
+      setActivity([]);
+      return;
+    }
+
+    // Convert upcoming events to activity items
+    const eventActivities: RecentActivity[] = events
+      .slice(0, 3) // Show only first 3 events
+      .map((event) => {
+        const eventDate = event.startTime || event.date;
+        const timeStr = eventDate ? new Date(eventDate).toLocaleDateString() : "TBA";
+        
+        return {
+          id: `event-${event.id}`,
+          type: "rsvp",
+          user: event.name,
+          action: `scheduled for ${timeStr}`,
+          time: event.startTime ? new Date(event.startTime).toLocaleString() : timeStr,
+        };
+      });
+
+    setActivity(eventActivities);
+  }, [events]);
+
+  // --------------------------------------------------
   // Save profile
   // --------------------------------------------------
   const handleSaveProfile = async () => {
@@ -631,11 +667,98 @@ export function ForOfficers({
     setShowKickDialog(true);
   };
 
-  const confirmKickMember = () => {
-    if (memberToKick) {
+  const confirmKickMember = async () => {
+    if (!memberToKick) return;
+
+    try {
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+      const currentUserId = getCurrentUserId();
+      
+      if (!currentUserId) {
+        alert("You must be logged in to remove members");
+        return;
+      }
+
+      const res = await fetch(
+        `${API_BASE}/clubs/${currentClubId}/kick`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            userId: memberToKick.id,
+            kickedBy: currentUserId,
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        console.error("Failed to remove member:", errorData);
+        alert(errorData.detail || errorData.error || "Failed to remove member from club");
+        return;
+      }
+
+      // Success - remove from UI
       setMembers(members.filter((m) => m.id !== memberToKick.id));
+      console.log("Member removed successfully");
+    } catch (error) {
+      console.error("Error removing member:", error);
+      alert("Network error removing member");
+    } finally {
       setShowKickDialog(false);
       setMemberToKick(null);
+    }
+  };
+
+  const confirmPromotion = async (newRole: string) => {
+    if (!memberToPromote || !effectiveClubId) return;
+
+    try {
+      const currentUserId = getCurrentUserId();
+      if (!currentUserId) {
+        alert("You must be logged in to promote members");
+        return;
+      }
+
+      const res = await fetch(
+        `${effectiveBase}/clubs/${effectiveClubId}/promote`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            userId: memberToPromote.id,
+            newRole,
+            promotedBy: currentUserId,
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        alert(errorData.error || "Failed to promote member");
+        return;
+      }
+
+      // Reload members list
+      const membersRes = await fetch(
+        `${effectiveBase}/clubs/${effectiveClubId}/members`,
+        { credentials: "include" }
+      );
+      if (membersRes.ok) {
+        const membersData: Member[] = await membersRes.json();
+        setMembers(membersData);
+      }
+
+      alert(`${memberToPromote.name} has been promoted to ${newRole}!`);
+    } catch (error) {
+      console.error("Error promoting member:", error);
+      alert("Network error promoting member");
+    } finally {
+      setShowPromoteDialog(false);
+      setMemberToPromote(null);
     }
   };
 
@@ -679,14 +802,72 @@ export function ForOfficers({
     setShowRegisterClubDialog(false);
   };
 
-  const handleInviteMember = () => {
-    console.log("Inviting member:", inviteForm);
-    setInviteForm({
-      memberName: "",
-      memberEmail: "",
-      message: "",
-    });
-    setShowInviteMemberDialog(false);
+  const handleInviteMember = async () => {
+    if (!effectiveClubId || !inviteForm.memberEmail) return;
+
+    try {
+      console.log("Looking up user by email:", inviteForm.memberEmail);
+      
+      // First, search for the student by email
+      const searchRes = await fetch(
+        `${effectiveBase}/students/search?email=${encodeURIComponent(inviteForm.memberEmail.trim())}`,
+        { credentials: "include" }
+      );
+
+      if (!searchRes.ok) {
+        alert("No user found with that email address");
+        return;
+      }
+
+      const studentData = await searchRes.json();
+      console.log("Found student:", studentData);
+      
+      // Now use the existing join endpoint
+      const joinRes = await fetch(
+        `${effectiveBase}/clubs/${effectiveClubId}/join`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            userId: studentData.id,
+          }),
+        }
+      );
+
+      const joinData = await joinRes.json();
+      console.log("Join response:", joinRes.status, joinData);
+
+      if (!joinRes.ok) {
+        if (joinData.error === "already_member") {
+          alert("This user is already a member of your club");
+        } else {
+          alert(joinData.detail || joinData.error || "Failed to add member");
+        }
+        return;
+      }
+
+      alert(`${studentData.name} has been added to your club!`);
+      
+      // Reset form and close dialog
+      setInviteForm({ memberEmail: "" });
+      setShowInviteMemberDialog(false);
+
+      // Reload members list
+      const membersRes = await fetch(
+        `${effectiveBase}/clubs/${effectiveClubId}/members`,
+        { credentials: "include" }
+      );
+      if (membersRes.ok) {
+        const membersData: Member[] = await membersRes.json();
+        setMembers(membersData);
+      }
+    } catch (err) {
+      console.error("Failed to invite member", err);
+      alert("Failed to add member. Please try again.");
+    }
   };
 
   // --------------------------------------------------
@@ -888,10 +1069,6 @@ export function ForOfficers({
                   DIALOG STATE = TRUE
                 </div>
               )}
-              <Button>
-                <Settings className="w-4 h-4 mr-2" />
-                Club Settings
-              </Button>
             </div>
           </div>
         </div>
@@ -1004,7 +1181,7 @@ export function ForOfficers({
                 <CardContent className="space-y-4">
                   {activity.length === 0 && (
                     <p className="text-sm text-gray-500">
-                      No recent activity yet.
+                      No upcoming events scheduled. Create an event to see activity here.
                     </p>
                   )}
                   {activity.map((activityItem) => (
@@ -1026,7 +1203,11 @@ export function ForOfficers({
                       </div>
                     </div>
                   ))}
-                  <Button variant="outline" className="w-full mt-4">
+                  <Button 
+                    variant="outline" 
+                    className="w-full mt-4"
+                    onClick={() => setSelectedTab("events")}
+                  >
                     View All Activity
                   </Button>
                 </CardContent>
@@ -1090,13 +1271,6 @@ export function ForOfficers({
                 <AlertDescription>{eventError}</AlertDescription>
               </Alert>
             )}
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold">Manage Events</h2>
-              <Button>
-                <Plus className="w-4 h-4 mr-2" />
-                Create Event
-              </Button>
-            </div>
             <Card>
               <CardHeader>
                 <CardTitle>Quick Create Event</CardTitle>
@@ -1207,6 +1381,14 @@ export function ForOfficers({
                 Invite Members
               </Button>
             </div>
+            
+            {showInviteMemberDialog && (
+              <Alert className="bg-blue-50 border-blue-200">
+                <AlertDescription className="text-blue-800">
+                  ↓ Scroll down to add a member
+                </AlertDescription>
+              </Alert>
+            )}
 
             <div className="grid lg:grid-cols-3 gap-6">
               <Card>
@@ -1253,9 +1435,15 @@ export function ForOfficers({
                       {metrics.attendanceRate}%
                     </div>
                     <div className="text-sm text-gray-500">Avg. Attendance</div>
-                    <div className="text-xs text-green-600">
-                      +3% vs last month
-                    </div>
+                    {metrics.attendanceRateChange !== 0 && (
+                      <div className={`text-xs ${
+                        metrics.attendanceRateChange > 0 
+                          ? 'text-green-600' 
+                          : 'text-red-600'
+                      }`}>
+                        {metrics.attendanceRateChange > 0 ? '+' : ''}{metrics.attendanceRateChange}% vs last month
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -1311,24 +1499,39 @@ export function ForOfficers({
                         </TableCell>
                         <TableCell>{member.eventsAttended}</TableCell>
                         <TableCell className="text-right">
-                          {member.position !== "president" ? (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleKickMember(member)}
-                              className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                            >
-                              <UserX className="w-4 h-4 mr-1" />
-                              Kick
-                            </Button>
-                          ) : (
-                            <Badge
-                              variant="outline"
-                              className="text-xs text-gray-400"
-                            >
-                              Protected
-                            </Badge>
-                          )}
+                          <div className="flex justify-end gap-2">
+                            {members.find(m => m.id === getCurrentUserId() && m.position === "president") && member.position !== "president" && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setMemberToPromote(member);
+                                  setShowPromoteDialog(true);
+                                }}
+                              >
+                                <TrendingUp className="w-4 h-4 mr-1" />
+                                Promote
+                              </Button>
+                            )}
+                            {member.position !== "president" ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => handleKickMember(member)}
+                                className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                              >
+                                <UserX className="w-4 h-4 mr-1" />
+                                Kick
+                              </Button>
+                            ) : (
+                              <Badge
+                                variant="outline"
+                                className="text-xs text-gray-400"
+                              >
+                                Protected
+                              </Badge>
+                            )}
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1358,17 +1561,17 @@ export function ForOfficers({
                         key={president.id}
                         className="flex flex-col items-center"
                       >
-                        <div className="w-64 p-6 bg-gradient-to-br from-purple-50 to-purple-100 border-2 border-purple-600 rounded-lg shadow-lg">
-                          <div className="flex items-center space-x-3 mb-3">
-                            <div className="w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-white">
-                              <Users className="w-6 h-6" />
+                        <div className="w-[700px] min-h-[200px] p-16 bg-gradient-to-br from-purple-50 to-purple-100 border-4 border-purple-600 rounded-xl shadow-2xl">
+                          <div className="flex items-center space-x-4 mb-6">
+                            <div className="w-16 h-16 bg-purple-600 rounded-full flex items-center justify-center text-white">
+                              <Users className="w-8 h-8" />
                             </div>
-                            <Badge className="bg-purple-600">President</Badge>
+                            <Badge className="bg-purple-600 text-yellow-400 text-lg px-4 py-2">President</Badge>
                           </div>
-                          <h3 className="font-bold text-lg text-gray-900">
+                          <h3 className="font-bold text-2xl text-gray-900 mb-2">
                             {president.name}
                           </h3>
-                          <p className="text-sm text-gray-600 break-all">
+                          <p className="text-base text-gray-600 break-all">
                             {president.email}
                           </p>
                         </div>
@@ -1386,7 +1589,7 @@ export function ForOfficers({
                           key={officer.id}
                           className="flex flex-col items-center"
                         >
-                          <div className="w-56 p-5 bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-500 rounded-lg shadow-md">
+                          <div className="w-96 p-10 bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-500 rounded-lg shadow-md">
                             <div className="flex items-center space-x-2 mb-3">
                               <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white">
                                 <Users className="w-5 h-5" />
@@ -1694,29 +1897,75 @@ export function ForOfficers({
       </div>
 
       {/* Kick Member Confirmation Dialog */}
-      <AlertDialog open={showKickDialog} onOpenChange={setShowKickDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Remove Member</AlertDialogTitle>
-            <AlertDialogDescription>
+      <Dialog open={showKickDialog} onOpenChange={setShowKickDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Member</DialogTitle>
+            <DialogDescription>
               Are you sure you want to remove{" "}
               <span className="font-semibold">{memberToKick?.name}</span> from
               the club? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setMemberToKick(null)}>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowKickDialog(false);
+                setMemberToKick(null);
+              }}
+            >
               Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={confirmKickMember}
-              className="bg-red-600 hover:bg-red-700"
+            </Button>
+            <Button
+              onClick={() => {
+                confirmKickMember();
+              }}
+              style={{ backgroundColor: '#dc2626', color: 'white' }}
+              className="hover:bg-red-700"
             >
               Remove Member
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Promote Member Dialog */}
+      <Dialog open={showPromoteDialog} onOpenChange={setShowPromoteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Promote {memberToPromote?.name}</DialogTitle>
+            <DialogDescription>
+              Change the role for this member.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 py-4">
+            {memberToPromote?.position === "member" && (
+              <Button onClick={() => confirmPromotion("officer")} className="w-full">
+                Promote to Officer
+              </Button>
+            )}
+            <Button 
+              variant="destructive" 
+              onClick={() => confirmPromotion("president")}
+              className="w-full bg-red-600 hover:bg-red-700 text-red-600"
+            >
+              Transfer Presidency (Irreversible)
+            </Button>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowPromoteDialog(false);
+                setMemberToPromote(null);
+              }}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Switch Clubs Dialog */}
 
@@ -1996,94 +2245,7 @@ export function ForOfficers({
         </DialogContent>
       </Dialog>
 
-      {/* Invite Member Dialog */}
-      <Dialog
-        open={showInviteMemberDialog}
-        onOpenChange={setShowInviteMemberDialog}
-      >
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Invite New Member</DialogTitle>
-            <DialogDescription>
-              Send an invitation to a new member to join your club.
-            </DialogDescription>
-          </DialogHeader>
 
-          <div className="space-y-6 py-4">
-            <div className="space-y-4">
-              <h3 className="font-semibold text-gray-900">
-                Member Information
-              </h3>
-
-              <div className="grid md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="member-name">Member Name *</Label>
-                  <Input
-                    id="member-name"
-                    placeholder="Full name"
-                    value={inviteForm.memberName}
-                    onChange={(e) =>
-                      setInviteForm({
-                        ...inviteForm,
-                        memberName: e.target.value,
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="member-email">Member Email *</Label>
-                  <Input
-                    id="member-email"
-                    type="email"
-                    placeholder="member@emory.edu"
-                    value={inviteForm.memberEmail}
-                    onChange={(e) =>
-                      setInviteForm({
-                        ...inviteForm,
-                        memberEmail: e.target.value,
-                      })
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="message">Message (Optional)</Label>
-                <Textarea
-                  id="message"
-                  placeholder="Add a personal message to your invitation..."
-                  rows={4}
-                  value={inviteForm.message}
-                  onChange={(e) =>
-                    setInviteForm({
-                      ...inviteForm,
-                      message: e.target.value,
-                    })
-                  }
-                />
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowInviteMemberDialog(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleInviteMember}
-              disabled={!inviteForm.memberName || !inviteForm.memberEmail}
-              className="bg-[#012169] hover:bg-[#001a5c]"
-            >
-              <Mail className="w-4 h-4 mr-2" />
-              Send Invitation
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Edit Event Dialog */}
       <Dialog
@@ -2230,6 +2392,63 @@ export function ForOfficers({
             >
               <Mail className="w-4 h-4 mr-2" />
               Send Announcement
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Invite Member Dialog */}
+      <Dialog
+        open={showInviteMemberDialog}
+        onOpenChange={setShowInviteMemberDialog}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Member</DialogTitle>
+            <DialogDescription>
+              Enter the email address of the user you want to add to your club.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="member-email">Member Email *</Label>
+              <Input
+                id="member-email"
+                type="email"
+                placeholder="member@emory.edu"
+                value={inviteForm.memberEmail}
+                onChange={(e) =>
+                  setInviteForm({
+                    memberEmail: e.target.value,
+                  })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && inviteForm.memberEmail) {
+                    handleInviteMember();
+                  }
+                }}
+              />
+              <p className="text-xs text-gray-500">
+                The user must already have an account with this email address.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowInviteMemberDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleInviteMember}
+              disabled={!inviteForm.memberEmail}
+              className="bg-[#012169] hover:bg-[#001a5c]"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Add Member
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -21,6 +21,8 @@ import {
   Loader2,
   AlertCircle,
   RefreshCw,
+  LogOut,
+  X,
 } from "lucide-react";
 import { getCurrentUserId } from "../authSession";
 
@@ -56,6 +58,7 @@ interface UserClub {
   engagement: number;
   nextEvent?: ClubNextEvent;
   recentActivity: ClubActivity[];
+  userRating: number;
 }
 
 interface UpcomingEvent {
@@ -195,6 +198,23 @@ async function toggleEventRsvp(
   return response.json();
 }
 
+/**
+ * Submit a rating for a club
+ */
+async function rateClub(clubId: string, userId: string, rating: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/clubs/${clubId}/review`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ userId, rating }),
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to submit rating");
+  }
+}
+
 // ============================================================
 // COMPONENT
 // ============================================================
@@ -212,6 +232,10 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
   const [upcomingEvents, setUpcomingEvents] = useState<UpcomingEvent[]>([]);
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
+
+  // Selected club for detailed view
+  const [selectedClub, setSelectedClub] = useState<UserClub | null>(null);
+  const [loadingDetailsId, setLoadingDetailsId] = useState<string | null>(null);
 
   // Loading and error states
   const [loading, setLoading] = useState(true);
@@ -282,6 +306,21 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
     }
   };
 
+  // Handle viewing club details
+  const handleViewDetails = (club: UserClub) => {
+    if (selectedClub?.id === club.id) {
+      // If already selected, close the details
+      setSelectedClub(null);
+    } else {
+      setSelectedClub(club);
+      // Scroll to details view
+      setTimeout(() => {
+        const el = document.getElementById(`club-details-${club.id}`);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 100);
+    }
+  };
+
   // Handle RSVP toggle
   const handleRsvpToggle = async (eventId: string) => {
     if (!userId) return;
@@ -302,6 +341,25 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
       alert(err instanceof Error ? err.message : "Failed to update RSVP");
     } finally {
       setActionLoading(null);
+    }
+  };
+
+  // Handle rating
+  const handleRate = async (clubId: string, rating: number) => {
+    if (!userId) return;
+    
+    // Optimistic update
+    setUserClubs(prev => prev.map(c => 
+      c.id === clubId ? { ...c, userRating: rating } : c
+    ));
+
+    try {
+      await rateClub(clubId, userId, rating);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to save rating");
+      // Revert on failure
+      loadData();
     }
   };
 
@@ -423,6 +481,43 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
       default:
         return <Bell className="w-4 h-4 text-gray-500" />;
     }
+  };
+
+  // Star Rating Component
+  const StarRating = ({ 
+    rating, 
+    onRate, 
+    disabled 
+  }: { 
+    rating: number; 
+    onRate: (r: number) => void; 
+    disabled?: boolean;
+  }) => {
+    const [hoverRating, setHoverRating] = useState(0);
+
+    return (
+      <div className="flex gap-1">
+        {[1, 2, 3, 4, 5].map((star) => (
+          <button
+            key={star}
+            type="button"
+            disabled={disabled}
+            onClick={() => onRate(star)}
+            onMouseEnter={() => setHoverRating(star)}
+            onMouseLeave={() => setHoverRating(0)}
+            className={`focus:outline-none transition-colors ${disabled ? 'cursor-default' : 'cursor-pointer'}`}
+          >
+            <Star 
+              className={`w-5 h-5 ${
+                (hoverRating || rating) >= star 
+                  ? "fill-yellow-400 text-yellow-400" 
+                  : "text-gray-300"
+              }`} 
+            />
+          </button>
+        ))}
+      </div>
+    );
   };
 
   return (
@@ -662,10 +757,8 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
             ) : (
               <div className="grid gap-6">
                 {userClubs.map((club) => (
-                  <Card
-                    key={club.id}
-                    className="hover:shadow-lg transition-shadow duration-200"
-                  >
+                  <div key={club.id}>
+                    <Card className="hover:shadow-lg transition-shadow duration-200">
                     <CardContent className="p-6">
                       <div className="flex items-start justify-between">
                         <div className="flex items-start space-x-4">
@@ -709,6 +802,14 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
                               />
                             </div>
 
+                            <div className="flex items-center justify-between text-sm mt-3">
+                              <span className="text-gray-600">My Rating</span>
+                              <StarRating 
+                                rating={club.userRating || 0} 
+                                onRate={(r) => handleRate(club.id, r)}
+                              />
+                            </div>
+
                             {club.nextEvent && (
                               <div className="bg-blue-50 p-3 rounded-md">
                                 <div className="text-sm font-medium text-blue-900">
@@ -728,40 +829,177 @@ export function MyClubs({ isLoggedIn }: MyClubsProps) {
                         <div className="flex flex-col space-y-2">
                           <Button
                             size="sm"
-                            onClick={() =>
-                              navigate(`/clubs/${club.id}/manage`)
-                            }
-                          >
-                            Manage
-                          </Button>
-                          <Button
-                            size="sm"
                             variant="outline"
-                            onClick={() => navigate(`/clubs/${club.id}`)}
+                            onClick={() => handleViewDetails(club)}
+                            disabled={loadingDetailsId === club.id}
                           >
-                            View Details
+                            {loadingDetailsId === club.id ? (
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                              selectedClub?.id === club.id ? "Hide Details" : "View Details"
+                            )}
                           </Button>
-                          {club.role === "Member" && (
+                          {(club.role === "Officer" || club.role === "President") && (
                             <Button
                               size="sm"
-                              variant="ghost"
-                              className="text-red-600 hover:text-red-700"
-                              onClick={() =>
-                                handleLeaveClub(club.id, club.name)
-                              }
-                              disabled={actionLoading === club.id}
+                              onClick={() => navigate(`/officers?clubId=${club.id}`)}
                             >
-                              {actionLoading === club.id ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : (
-                                "Leave Club"
-                              )}
+                              <Settings className="w-4 h-4 mr-2" />
+                              Manage Club
                             </Button>
                           )}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                            onClick={() => handleLeaveClub(club.id, club.name)}
+                            disabled={actionLoading === club.id}
+                          >
+                            {actionLoading === club.id ? (
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                              <LogOut className="w-4 h-4 mr-2" />
+                            )}
+                            Leave Club
+                          </Button>
                         </div>
                       </div>
                     </CardContent>
                   </Card>
+
+                  {/* Detailed View */}
+                  {selectedClub?.id === club.id && (
+                    <div
+                      id={`club-details-${club.id}`}
+                      className="bg-white border rounded-xl shadow-sm mt-4"
+                    >
+                      {/* Header row */}
+                      <div className="flex items-start justify-between p-6 border-b">
+                        <div className="space-y-2">
+                          <div className="flex items-center space-x-2">
+                            <h2 className="text-2xl font-bold text-gray-900">
+                              {club.name}
+                            </h2>
+                            {club.verified && (
+                              <CheckCircle className="w-5 h-5 text-green-500" />
+                            )}
+                          </div>
+                          <div className="flex items-center space-x-4 text-sm text-gray-500">
+                            <div className="flex items-center space-x-1">
+                              <Users className="w-4 h-4" />
+                              <span>{club.memberCount} members</span>
+                            </div>
+                            <div className="flex items-center space-x-1">
+                              <Badge variant="outline">{club.role}</Badge>
+                            </div>
+                            <div className="flex items-center space-x-1">
+                              <Calendar className="w-4 h-4" />
+                              <span>Joined {club.joinDate}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          className="p-2 rounded-full hover:bg-gray-100"
+                          onClick={() => setSelectedClub(null)}
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+
+                      {/* Details content */}
+                      <div className="p-6 space-y-6">
+                        <div>
+                          <h3 className="text-lg font-semibold mb-3">Club Information</h3>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Category:</span>
+                              <span className="font-medium">{club.category}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Engagement:</span>
+                              <span className="font-medium">{club.engagement}%</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Last Activity:</span>
+                              <span className="font-medium">{club.lastActivity}</span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                              <span className="text-gray-600">My Rating:</span>
+                              <StarRating 
+                                rating={club.userRating || 0} 
+                                onRate={(r) => handleRate(club.id, r)}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {club.nextEvent && (
+                          <div>
+                            <h3 className="text-lg font-semibold mb-3">Upcoming Event</h3>
+                            <div className="bg-blue-50 p-4 rounded-md space-y-2">
+                              <div className="font-medium text-blue-900">
+                                {club.nextEvent.name}
+                              </div>
+                              <div className="text-sm text-blue-700">
+                                {club.nextEvent.date} at {club.nextEvent.time}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {club.recentActivity && club.recentActivity.length > 0 && (
+                          <div>
+                            <h3 className="text-lg font-semibold mb-3">Recent Activity</h3>
+                            <div className="space-y-2">
+                              {club.recentActivity.map((activity, idx) => (
+                                <div
+                                  key={idx}
+                                  className="flex items-start space-x-3 p-3 bg-gray-50 rounded-md"
+                                >
+                                  <MessageSquare className="w-4 h-4 text-gray-500 mt-0.5" />
+                                  <div className="flex-1">
+                                    <div className="text-sm font-medium">
+                                      {activity.title}
+                                    </div>
+                                    <div className="text-xs text-gray-500">
+                                      {activity.time}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex space-x-3 pt-4 border-t">
+                          {(club.role === "Officer" || club.role === "President") && (
+                            <Button
+                              onClick={() => navigate(`/officers?clubId=${club.id}`)}
+                              className="flex-1"
+                            >
+                              <Settings className="w-4 h-4 mr-2" />
+                              Manage Club
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            onClick={() => handleLeaveClub(club.id, club.name)}
+                            disabled={actionLoading === club.id}
+                            className="flex-1 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          >
+                            {actionLoading === club.id ? (
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                              <LogOut className="w-4 h-4 mr-2" />
+                            )}
+                            Leave Club
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  </div>
                 ))}
               </div>
             )}

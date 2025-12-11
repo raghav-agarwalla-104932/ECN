@@ -131,19 +131,24 @@ def create_club(payload: dict) -> str:
 # ---- Events ----
 def list_events(upcoming_only: bool = True) -> List[Dict[str, Any]]:
     with get_session() as s:
-        q = s.query(Event)
+        q = s.query(Event, Club).join(Club, Event.club_id == Club.id)
         if upcoming_only:
-            q = q.filter(Event.start_time >= datetime.utcnow() - timedelta(days=1))
-        events = q.order_by(Event.start_time.asc()).all()
+            q = q.filter(Event.start_time >= datetime.now(timezone.utc))
+
+
+        results = q.order_by(Event.start_time.asc()).all()
         return [{
             "id": str(e.id),
             "clubId": str(e.club_id),
+            "clubName": c.name,           # ← Add this
+            "club_verified": c.verified,  # ← Add this
             "title": e.title,
             "startTime": e.start_time.isoformat(),
             "endTime": e.end_time.isoformat() if e.end_time else None,
             "location": e.location,
             "status": e.status
-        } for e in events]
+        } for e, c in results]  # ← Note: unpacking (e, c) tuple
+
 
 def create_event(payload: dict) -> str:
     req = ["clubId", "title", "startTime", "endTime"]
@@ -206,7 +211,7 @@ def _avg_rating_for_club(session, club_id) -> float:
     return round(val, 1)
 
 def _next_event_for_club(session, club_id) -> Optional[dict]:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     evt = (
         session.query(Event)
         .filter(Event.club_id == club_id, Event.start_time >= now)
@@ -215,9 +220,14 @@ def _next_event_for_club(session, club_id) -> Optional[dict]:
     )
     if not evt:
         return None
-    # simple pretty date/time
-    date_str = evt.start_time.strftime("%b %d")
-    time_str = evt.start_time.strftime("%-I:%M %p")
+    
+    # Convert UTC to EST/EDT for display
+    from zoneinfo import ZoneInfo
+    est_time = evt.start_time.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    
+    date_str = est_time.strftime("%b %d")
+    time_str = est_time.strftime("%-I:%M %p")
+    
     return {
         "name": evt.title,
         "date": date_str,
@@ -273,7 +283,7 @@ def list_clubs(
 
         # Build enriched items expected by the UI
         items: List[Dict[str, Any]] = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Preload upcoming events per club (counts) to compute activity
         upcoming_counts = {
@@ -303,6 +313,7 @@ def list_clubs(
                 "lastUpdatedISO": c.updated_at.isoformat(),
                 "nextEvent": next_evt,
                 "website": c.request_info_form_url,  # best available url-ish field
+                "contactEmail": c.contact_email, 
                 "tags": [],                        # placeholder; no tags model
                 "activityScore": activity,
                 "discoverabilityIndex": discover,
@@ -394,3 +405,4 @@ def auth_login(email: str, password: str) -> Dict[str, Any]:
     issued = _now_ts()
     token = _sign(f"{user['id']}|{user['email']}|{issued}")
     return {"user": user, "token": token, "maxAge": _MAX_AGE}
+
